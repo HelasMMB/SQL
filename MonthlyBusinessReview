@@ -1,0 +1,163 @@
+with go_live_dates_prep as (
+		select
+			AGENT_ID
+			, max(go_live_date) as most_recent_go_live_date
+		from DATABASE1.ROSTER_TABLE
+		group by 1
+	)
+
+	, go_live_dates as (
+	    select
+	        AGENT_ID
+	        , if(most_recent_go_live_date = '' or most_recent_go_live_date is null, date_format(date_add('month',-3,current_date),'%Y-%m-%d'), most_recent_go_live_date) as most_recent_go_live_date
+	    from go_live_dates_prep
+	)
+
+  /* basing billing group on agent workflow/microflow data */
+	, new_billing_group_2023 as (
+		select
+			workflow
+			, microflow
+			, billing_group
+			, case
+				when wbr_slide = 'TEAM_ALT_NAME' then 'TEAM_NAME'
+				else wbr_slide end as wbr_slide
+		from DATABASE1.new_billing_group_2023
+	)
+
+	, METRICS_DATA as (
+		select
+			METRICS_DATA_HUB.report_month as month
+      /* filtering special case agents */
+			, case
+	            when METRICS_DATA_HUB.AGENT_ID = 'AGENT_ID' then 'ALT_TEAM_NAME'
+                else coalesce(bg_2023.wbr_slide, DAILY_ROSTER.current_workflow) end as team
+			, sum(METRIC_NUM_COLUMN) as METRIC_NUM
+			, sum(METRIC_DENOM_COLUMN) as METRIC_DENOM
+      /* so on and so forth for other metrics */
+		from DATABASE1.METRICS_DATA_HUB as METRICS_DATA_HUB
+		left join go_live_dates on METRICS_DATA_HUB.AGENT_ID = go_live_dates.AGENT_ID
+		left join (select distinct * from DATABASE2.DAILY_ROSTER) as DAILY_ROSTER 
+			on METRICS_DATA_HUB.AGENT_ID = DAILY_ROSTER.AGENT_ID 
+			and METRICS_DATA_HUB.report_date = DAILY_ROSTER.roster_date  
+			and coalesce(DAILY_ROSTER.roll_off_date, date'2099-12-31') > METRICS_DATA_HUB.report_date
+		left join new_billing_group_2023 as bg_2023
+			on bg_2023.microflow = DAILY_ROSTER.microflow
+		where METRICS_DATA_HUB.actor_role = 'Reviewer' 
+			and METRICS_DATA_HUB.program = WORK_PROGRAM 
+			and METRICS_DATA_HUB.city = 'Austin'
+			and report_date > date(most_recent_go_live_date)
+			/* non-applicable agents */
+			and METRICS_DATA_HUB.AGENT_ID not in (
+				'AGENT_NAME'
+			)
+		group by 1, 2
+
+		union all
+
+		select
+			METRICS_DATA_HUB.report_month as month
+			, 'TOTAL' as team
+			, sum(METRIC_NUM_COLUMN) as METRIC_NUM
+			, sum(METRIC_DENOM_COLUMN) as METRIC_DENOM
+      /* so on and so forth for other metrics */
+		from DATABASE1.METRICS_DATA_HUB_bi_efficiency as METRICS_DATA_HUB
+		left join go_live_dates on METRICS_DATA_HUB.AGENT_ID = go_live_dates.AGENT_ID
+		where METRICS_DATA_HUB.actor_role = 'Reviewer' 
+			and METRICS_DATA_HUB.program = WORK_PROGRAM 
+			and METRICS_DATA_HUB.city = 'Austin'
+			and report_date > date(most_recent_go_live_date)
+			/* non-applicable agents */
+			and METRICS_DATA_HUB.AGENT_ID not in (
+				'AGENT_NAME'
+			)
+		group by 1, 2
+	)
+
+	, timestamps as (
+		select
+			AGENT_ACTIVITY.report_month as month
+			, case
+	            'AGENT_ID' then 'ALT_TEAM_NAME'
+                else coalesce(bg_2023.wbr_slide, DAILY_ROSTER.current_workflow) end as team
+			, sum(TIMESTAMP_METRIC) as TIMESTAMP_METRIC_hrs
+      /* so on and so forth for other timestamps */
+		from DATABASE2.AGENT_ACTIVITY as AGENT_ACTIVITY
+		left join go_live_dates on AGENT_ACTIVITY.AGENT_ID = go_live_dates.AGENT_ID
+		left join (select distinct * from DATABASE2.DAILY_ROSTER) as DAILY_ROSTER
+			on AGENT_ACTIVITY.AGENT_ID = DAILY_ROSTER.AGENT_ID
+			and AGENT_ACTIVITY.local_ds = DAILY_ROSTER.roster_date
+		left join new_billing_group_2023 as bg_2023
+			on bg_2023.microflow = DAILY_ROSTER.microflow
+		where AGENT_ACTIVITY.actor_role = 'Reviewer' 
+			and AGENT_ACTIVITY.program = WORK_PROGRAM 
+			and AGENT_ACTIVITY.city = 'Austin'
+			and local_ds > date(most_recent_go_live_date)
+      /* non-applicable agents */
+			and AGENT_ACTIVITY.AGENT_ID not in (
+				'AGENT_NAME'
+			)
+		group by 1, 2
+
+		union all
+
+		select
+			AGENT_ACTIVITY.report_month as month
+			, 'TOTAL' as team
+			, sum(TIMESTAMP_METRIC) as TIMESTAMP_METRIC_hrs
+      /* so on and so forth for other timestamps */
+		from DATABASE2.AGENT_ACTIVITY as AGENT_ACTIVITY
+		left join go_live_dates on AGENT_ACTIVITY.AGENT_ID = go_live_dates.AGENT_ID
+		where actor_role = 'Reviewer' 
+			and program = WORK_PROGRAM 
+			and city = 'Austin'
+			and local_ds > date(most_recent_go_live_date)
+			/* non-applicable agents */
+			and AGENT_ACTIVITY.AGENT_ID not in (
+				'AGENT_NAME'
+			)
+		group by 1, 2
+	)
+
+	select
+		concat(
+			case
+				when a.month like '%_01' then 'Jan'
+				when a.month like '%_02' then 'Feb'
+				when a.month like '%_03' then 'Mar'
+				when a.month like '%_04' then 'Apr'
+				when a.month like '%_05' then 'May'
+				when a.month like '%_06' then 'Jun'
+				when a.month like '%_07' then 'Jul'
+				when a.month like '%_08' then 'Aug'
+				when a.month like '%_09' then 'Sep'
+				when a.month like '%_10' then 'Oct'
+				when a.month like '%_11' then 'Nov'
+				when a.month like '%_12' then 'Dec'
+				end
+			, coalesce(a.team, b.team)
+		) as month_team_key
+		, case
+			when a.month like '%_01' then 'Jan'
+			when a.month like '%_02' then 'Feb'
+			when a.month like '%_03' then 'Mar'
+			when a.month like '%_04' then 'Apr'
+			when a.month like '%_05' then 'May'
+			when a.month like '%_06' then 'Jun'
+			when a.month like '%_07' then 'Jul'
+			when a.month like '%_08' then 'Aug'
+			when a.month like '%_09' then 'Sep'
+			when a.month like '%_10' then 'Oct'
+			when a.month like '%_11' then 'Nov'
+			when a.month like '%_12' then 'Dec'
+			else null end as month
+		, coalesce(a.team, b.team) as team
+		, METRIC_COLUMN_A
+    , METRIC_COLUMN_B
+    , TIMESTAMP_COLUMN_A
+    , TIMESTAMP_COLUMN_B
+    , /* etc */
+	from METRICS_DATA a
+	left join timestamps b on a.month = b.month and a.team = b.team
+	where a.month in ('2023_05','2023_06', '2023_07')
+	order by month desc

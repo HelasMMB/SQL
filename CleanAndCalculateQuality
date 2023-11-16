@@ -1,0 +1,144 @@
+with audit_scores as (
+    with prep as (
+        select
+            case
+                when week[1] like '%20%' then concat(week[1], '-', week[2], '-', week[3])
+                when week[1] not like '%20%' and week[3] like '%20%' then concat(week[3], '-', if(length(week[1]) = 1, concat('0',week[1]),week[1]),'-',if(length(week[2]) = 1, concat('0',week[2]),week[2]))
+                when week[1] not like '%20%' and week[3] not like '%20%' then concat('20', week[3], '-', if(length(week[1]) = 1, concat('0',week[1]),week[1]),'-',if(length(week[2]) = 1, concat('0',week[2]),week[2]))
+                end as week
+            , date
+            , reviewer
+            , AGENT_ID 
+            , score
+            , job_id
+        from (
+            select distinct 
+                case
+                    when week like '%/%' then split(replace(week, 'WC ', ''), '/')
+                    when week like '%-%' and week not like '%20%' then split(replace(week, 'WC ', ''), '-')
+                    when week not like '%WC%' then split(week, '-')
+                    end as week
+                , date
+                , reviewer
+                , coalesce(a.AGENT_ID, b.AGENT_ID) as AGENT_ID
+                , try_cast(score as int) score
+                , job_id 
+            from atx_quality a
+            left join ROSTER_TABLE_NAME b on a.reviewer = b.preferred_name
+            where reviewer is not null 
+            and reviewer != '' 
+            and a.AGENT_ID != '#N/A'
+        )
+        where cardinality(week) = 3
+    )
+
+    , consolidate_scores as (
+        select
+            week
+            , AGENT_ID
+            , count(score) as total_audits
+            , sum(score) as total_score
+        from prep
+        group by 1,2
+    )
+    
+    select
+        week
+        , AGENT_ID
+        , total_audits
+        , total_score
+    from consolidate_scores
+)
+
+, pkt_scores as (
+    with format_wc as (
+    	select
+    		location
+    		, concat('20', wc[3], '-', if(length(wc[1]) = 1, concat('0',wc[1]),wc[1]),'-',if(length(wc[2]) = 1, concat('0',wc[2]),wc[2])) as ww_txt
+    		, workflow
+    		, job_id
+    		, queue
+    		, reviewer
+    		, srt_id
+    		, reviewer_decision
+    		, auditor_decision
+    		, policy_name
+    	from (
+    		select
+    			location
+    			, split(replace(wc, 'WC ', ''), '-') as wc
+    			, workflow
+    			, job_id
+    			, queue
+    			, reviewer
+    			, srt_id
+    			, reviewer_decision
+    			, auditor_decision
+    			, policy_name
+    		from (select distinct * from atx_pkt_scores)
+    	)
+        where cardinality(wc) = 3
+    )
+    
+    , prep_scores as (
+    	select
+    		ww_txt
+    		, reviewer
+    		, srt_id
+    		, case
+    			when reviewer_decision = auditor_decision then 100
+    			when reviewer_decision != auditor_decision then 0
+    			end as correct_decision		
+    	from format_wc
+    )
+    
+    , calculate_scores as (
+        select
+            ww_txt
+            , reviewer
+            , srt_id
+            , count(*) as total_audits
+            , sum(correct_decision) as total_score
+        from prep_scores
+        group by 1,2,3
+    )
+    select
+        ww_txt
+        , reviewer
+        , a.AGENT_TOOL_ID
+        , AGENT_ID
+        , total_audits
+        , total_score
+    from calculate_scores a
+    left join ROSTER_TABLE_NAME b on a.AGENT_TOOL_ID = b.AGENT_TOOL_ID
+    where a.AGENT_TOOL_ID is not null and a.AGENT_TOOL_ID != ''
+)
+
+, consolidate_scores as (
+    select
+        week
+        , AGENT_ID
+        , total_audits
+        , total_score
+    from audit_scores
+    where total_score is not null
+    
+    union all
+    
+    select
+        ww_txt
+        , AGENT_ID
+        , total_audits
+        , total_score
+    from pkt_scores
+    where total_score is not null
+)
+
+select
+    week
+    , AGENT_ID
+    , total_audits
+    , total_score
+from consolidate_scores
+where AGENT_ID != '' and AGENT_ID is not null
+order by week desc

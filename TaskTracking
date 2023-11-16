@@ -1,0 +1,76 @@
+with task_numbers as (
+	select
+		distinct(task_number)
+	from DATABASE.TASK_DATA_UNNESTED
+	where folder_desc = 'TEAM_FOLDER'
+)
+
+, task_events as (
+	select 
+		a.task_number as task_number
+		, task_updated_by_id
+		, date_add('hour',-5,from_unixtime(time)) as event_time
+		, log_type
+		, task_created_time
+	from task_numbers a
+	left join DATABASE.TASK_DATA_RAW b on a.task_number = b.task_number
+	order by 1, 3
+)
+
+/* identifying start and end of every individual agent interaction by sorting chronologically and checking for changes to ID of task updating agent */
+, interaction_windows as (
+	select 
+		task_number
+		, task_updated_by_id
+		, min(event_time) as start_time
+		, max(event_time) as end_time
+	from (
+		select *,
+			sum(case when task_updated_by_id = prev_id then 0 else 1 end)
+				over (partition by task_number, task_updated_by_id order by event_time) as grp
+		from (
+			select *
+				, lag(task_updated_by_id) over (partition by task_number order by event_time) as prev_id
+			from task_events
+		)
+	)
+	group by task_number, task_updated_by_id, grp
+)
+
+, prep_for_export as (
+	select
+		task_number
+		, preferred_name
+		, start_time
+		, end_time
+	    , date_diff('minute', start_time, end_time) as handle_time_min
+		, team
+		, workflow
+		, microflow 
+		, ww_text
+		, date_key
+	from interaction_windows a
+	left join DATABASE.ROSTER b on a.task_updated_by_id = b.AGENT_ID
+	left join DATABASE.ref_date c on date_trunc('day', a.end_time) = c.date_key
+	where preferred_name is not null and preferred_name != ''
+	and date_key between date('2023-01-01') and date('2023-04-12')
+	order by start_time desc
+)
+
+, tats as (
+    select
+    	a.task_number
+    	, date_add('hour', -5, from_unixtime(task_created_time)) as task_created_time
+    	, min(end_time) as first_touch
+    from prep_for_export a
+    left join TASK_DATA_UNNESTED b
+    on a.task_number = b.task_number
+    left join TASK_DATA_RAW c
+    	on a.task_number = c.task_number
+    where folder_desc = 'TEAM_FOLDER'
+    and from_unixtime(task_created_time) > date('2023-01-01')
+    group by 1, 2
+)
+
+select avg(date_diff('hour', task_created_time, first_bi_touch))
+from tats
